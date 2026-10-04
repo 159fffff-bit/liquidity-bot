@@ -2,8 +2,15 @@
 """
 官方金融指標爬蟲（強化版）- SOFR-IORB 改為「較早日期基準」邏輯
 每一筆數據都標註日期
+
+啟動時自動透過 Discord Webhook 將報告以 Embed 形式發送到指定頻道
+
+【GitHub Actions 部署】
+- Repository Secrets 設定 DISCORD_WEBHOOKS（多個用逗號或換行分隔）
+- 本機可 export DISCORD_WEBHOOKS=... 或填下方 FALLBACK 列表
 """
 
+import os
 import requests
 import csv
 import io
@@ -18,6 +25,33 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; OfficialFinancialDataBot/2.1)",
     "Accept": "application/json, text/csv, */*"
 }
+
+# ============================================================
+# Discord Webhook（優先讀環境變數 DISCORD_WEBHOOKS）
+# GitHub Actions → Settings → Secrets → DISCORD_WEBHOOKS
+# ============================================================
+DISCORD_WEBHOOKS_FALLBACK: List[str] = [
+    # 本機測試可暫時取消註解，正式部署請用 Secrets，勿 commit 真實 URL
+    # "https://discord.com/api/webhooks/YOUR_ID/YOUR_TOKEN",
+]
+
+EMBED_COLOR = 0x1E90FF
+
+
+def load_webhooks() -> List[str]:
+    """從環境變數或 FALLBACK 載入 webhook（支援逗號 / 換行分隔）"""
+    env_val = os.environ.get("DISCORD_WEBHOOKS", "").strip()
+    if env_val:
+        urls = []
+        for part in env_val.replace("\r", "\n").split("\n"):
+            for u in part.split(","):
+                u = u.strip()
+                if u and "YOUR_WEBHOOK" not in u and "YOUR_ID" not in u:
+                    urls.append(u)
+        if urls:
+            return urls
+    return [u for u in DISCORD_WEBHOOKS_FALLBACK if u and "YOUR_" not in u]
+
 
 def fetch_fred_csv(series_id: str, retries: int = 3) -> List[Tuple[str, float]]:
     """從 FRED 取得最新序列，回傳 [(date, value), ...] 最新在前"""
@@ -43,6 +77,7 @@ def fetch_fred_csv(series_id: str, retries: int = 3) -> List[Tuple[str, float]]:
                 return []
             time.sleep(1.5 * (attempt + 1))
     return []
+
 
 def get_sofr_iorb() -> Dict:
     """
@@ -106,6 +141,7 @@ def get_sofr_iorb() -> Dict:
         "is_positive_streak": consecutive_positive > 0
     }
 
+
 def get_reserves() -> Dict:
     """銀行準備金（最新週平均 + 最新週三水平）"""
     wresbal = fetch_fred_csv("WRESBAL")
@@ -125,6 +161,7 @@ def get_reserves() -> Dict:
         "wednesday_date": wed_date,
         "below_2_9": (avg_t < 2.9) if avg_t is not None else None
     }
+
 
 def get_tga() -> Dict:
     """TGA：優先日度 API，失敗則用最新週度 FRED WTREGEN"""
@@ -163,6 +200,7 @@ def get_tga() -> Dict:
         }
 
     return {"source": "無法取得", "close_billion": None, "date": None, "trillion": None}
+
 
 def generate_report() -> str:
     """產生符合原提示詞格式的最新報告（SOFR-IORB 使用新邏輯）"""
@@ -207,5 +245,50 @@ def generate_report() -> str:
 """
     return report
 
+
+def send_to_discord(report: str) -> None:
+    """將報告以 Embed 形式發送到所有設定的 Discord Webhook"""
+    webhooks = load_webhooks()
+    if not webhooks:
+        print("[警告] 尚未設定有效的 Discord Webhook")
+        print("  → 本機：export DISCORD_WEBHOOKS=... 或填 DISCORD_WEBHOOKS_FALLBACK")
+        print("  → GitHub：Settings → Secrets → DISCORD_WEBHOOKS")
+        return
+
+    description = report
+    if len(description) > 4090:
+        description = description[:4080] + "\n\n...(內容過長已截斷)"
+
+    payload = {
+        "username": "交通號誌",
+        "embeds": [
+            {
+                "title": "🚦 紅綠燈",
+                "description": f"```\n{description}\n```",
+                "color": EMBED_COLOR,
+                "footer": {
+                    "text": f"自動推送 · {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                },
+                "timestamp": datetime.utcnow().isoformat()
+            }
+        ]
+    }
+
+    for i, webhook_url in enumerate(webhooks, 1):
+        try:
+            r = requests.post(webhook_url, json=payload, timeout=15)
+            if r.status_code in (200, 204):
+                print(f"[成功] 已發送到 Webhook #{i}")
+            else:
+                print(f"[失敗] Webhook #{i} 回傳 {r.status_code}: {r.text[:200]}")
+        except Exception as e:
+            print(f"[錯誤] Webhook #{i} 發送失敗: {e}")
+
+
 if __name__ == "__main__":
-    print(generate_report())
+    report = generate_report()
+    print(report)
+    print("\n" + "=" * 50)
+    print("開始透過 Discord Webhook 推送報告...")
+    send_to_discord(report)
+    print("推送流程結束。")
