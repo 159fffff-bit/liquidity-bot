@@ -1,0 +1,38 @@
+# 紅綠燈 - 官方金融指標自動推送
+# 每天自動執行並發送到 Discord
+
+name: 紅綠燈 自動推送
+
+on:
+  # 排程：每天台灣時間約 09:00、15:00、21:00（對應 UTC 01:00、07:00、13:00）
+  schedule:
+    - cron: "0 12 * * 1-5"  # 台灣 21:00
+  # 手動觸發
+  workflow_dispatch:
+
+jobs:
+  run-traffic-light:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run 紅綠燈
+        env:
+          # 在 GitHub → Settings → Secrets and variables → Actions
+          # 新增 Secret 名稱：DISCORD_WEBHOOKS
+          # 內容：多個 webhook 用逗號分隔
+          DISCORD_WEBHOOKS: ${{ secrets.DISCORD_WEBHOOKS }}
+        run: python 紅綠燈.py
