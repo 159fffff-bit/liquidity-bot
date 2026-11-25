@@ -268,13 +268,17 @@ def generate_report() -> str:
    - 更新頻率：SOFR 每個營業日約 8:00 ET（通常落後 1 個營業日）；IORB 每日
 
 2. 銀行準備金
-   - 最新週平均數值（兆美元）與結束日期：{reserves.get('week_avg_trillion')} 兆美元（結束 {reserves.get('week_avg_end_date')}）
-   - 最新週三水平數值（兆美元）與日期：{reserves.get('wednesday_level_trillion')} 兆美元（{reserves.get('wednesday_date')}）
+   - 最新週平均數值（兆美元）與結束日期：{reserves.get('week_avg_trillion')} 兆美元
+    （結束 {reserves.get('week_avg_end_date')}）
+   - 最新週三水平數值（兆美元）與日期：{reserves.get('wednesday_level_trillion')} 兆美元
+    （{reserves.get('wednesday_date')}）
    - 是否已跌破 2.9 兆美元：{'是' if reserves.get('below_2_9') else '否'}
    - 更新頻率與下次發布時間：每週四（H.4.1），下次約下一個週四
 
 3. TGA（財政部一般帳戶）
-   - 最新日度/可用收盤餘額（億或兆美元）與日期：{tga.get('close_billion')} 億美元（約 {tga.get('trillion')} 兆）（數據日期 {tga.get('date')}）【來源：{tga.get('source')}】
+   - 最新日度/可用收盤餘額（億或兆美元）與日期：
+       {tga.get('close_billion')} 億美元（約 {tga.get('trillion')} 兆）
+    （數據日期 {tga.get('date')}）【來源：{tga.get('source')}】
    - 最新週度（H.4.1 / FRED）數值與日期：同上（最新可用）
    - 是否正在向 1 兆美元靠攏：{'是' if approaching_1t else '否 / 觀察中'}
    - 更新頻率：日度每日更新；週度每週四
@@ -283,7 +287,8 @@ def generate_report() -> str:
    - 最新可核讀數：{ccc.get('value')}% （數據日期 {ccc.get('date')}）
    - 狼式參照線：不高於 13.61% → {'符合' if ccc_ok else '已突破（不符合）'}
    - 來源：{ccc.get('source')}
-   - 說明：ICE BofA CCC & Lower US High Yield Index OAS，市值加權 Option-Adjusted Spread
+   - 說明：ICE BofA CCC & Lower US High Yield Index OAS，
+     市值加權 Option-Adjusted Spread
 
 5. VIX 收盤（反彈觀察條件）
    - 最新可核讀數：{vix.get('value')} （數據日期 {vix.get('date')}）
