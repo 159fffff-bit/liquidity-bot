@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 官方金融指標爬蟲（強化版）- SOFR-IORB 改為「較早日期基準」邏輯
 每一筆數據都標註日期
@@ -8,13 +9,17 @@
 【GitHub Actions 部署】
 - Repository Secrets 設定 DISCORD_WEBHOOKS（多個用逗號或換行分隔）
 - 本機可 export DISCORD_WEBHOOKS=... 或填下方 FALLBACK 列表
+
+新增：反彈三個觀察條件（隔夜融資利差 / CCC及以下信用利差 / VIX收盤）
 """
 
 import os
+import sys
 import requests
 import csv
 import io
-from datetime import datetime
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from typing import List, Tuple, Dict, Optional
 import time
 
@@ -25,6 +30,8 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; OfficialFinancialDataBot/2.1)",
     "Accept": "application/json, text/csv, */*"
 }
+
+TW = ZoneInfo("Asia/Taipei")
 
 # ============================================================
 # Discord Webhook（優先讀環境變數 DISCORD_WEBHOOKS）
@@ -41,6 +48,7 @@ EMBED_COLOR = 0x1E90FF
 def load_webhooks() -> List[str]:
     """從環境變數或 FALLBACK 載入 webhook（支援逗號 / 換行分隔）"""
     env_val = os.environ.get("DISCORD_WEBHOOKS", "").strip()
+    print(f"[診斷] DISCORD_WEBHOOKS 環境變數長度: {len(env_val)}")
     if env_val:
         urls = []
         for part in env_val.replace("\r", "\n").split("\n"):
@@ -48,9 +56,12 @@ def load_webhooks() -> List[str]:
                 u = u.strip()
                 if u and "YOUR_WEBHOOK" not in u and "YOUR_ID" not in u:
                     urls.append(u)
+        print(f"[診斷] 解析到 {len(urls)} 個有效 webhook")
         if urls:
             return urls
-    return [u for u in DISCORD_WEBHOOKS_FALLBACK if u and "YOUR_" not in u]
+    fallback = [u for u in DISCORD_WEBHOOKS_FALLBACK if u and "YOUR_" not in u]
+    print(f"[診斷] FALLBACK 有效數量: {len(fallback)}")
+    return fallback
 
 
 def fetch_fred_csv(series_id: str, retries: int = 3) -> List[Tuple[str, float]]:
@@ -94,18 +105,14 @@ def get_sofr_iorb() -> Dict:
     if not sofr_list or not iorb_list:
         return {"error": "無法取得 SOFR 或 IORB"}
 
-    # 1. 各自最新
     sofr_latest_date, sofr_latest_val = sofr_list[0]
     iorb_latest_date, iorb_latest_val = iorb_list[0]
 
-    # 2. 較早日期作為基準
     base_date = min(sofr_latest_date, iorb_latest_date)
 
-    # 建立查詢字典
     sofr_dict = {d: v for d, v in sofr_list}
     iorb_dict = {d: v for d, v in iorb_list}
 
-    # 3. 讀取基準日當天的兩項數據
     sofr_on_base = sofr_dict.get(base_date)
     iorb_on_base = iorb_dict.get(base_date)
 
@@ -113,7 +120,6 @@ def get_sofr_iorb() -> Dict:
     if sofr_on_base is not None and iorb_on_base is not None:
         spread_bps = round((sofr_on_base - iorb_on_base) * 100, 2)
 
-    # 連續轉正天數（從最新共同日期往回）
     common_dates = sorted(set(sofr_dict.keys()) & set(iorb_dict.keys()), reverse=True)
     consecutive_positive = 0
     for d in common_dates:
@@ -124,19 +130,14 @@ def get_sofr_iorb() -> Dict:
             break
 
     return {
-        # 各自最新
         "sofr_latest_val": sofr_latest_val,
         "sofr_latest_date": sofr_latest_date,
         "iorb_latest_val": iorb_latest_val,
         "iorb_latest_date": iorb_latest_date,
-
-        # 基準日（較早日期）
         "base_date": base_date,
         "sofr_on_base": sofr_on_base,
         "iorb_on_base": iorb_on_base,
         "spread_bps": spread_bps,
-
-        # 連續轉正
         "consecutive_positive_days": consecutive_positive,
         "is_positive_streak": consecutive_positive > 0
     }
@@ -186,8 +187,8 @@ def get_tga() -> Dict:
                             "date": item.get("record_date"),
                             "trillion": round(close_f / 1000, 3)
                         }
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[警告] FiscalData API 失敗，改用 FRED: {e}")
 
     wtregen = fetch_fred_csv("WTREGEN")
     if wtregen:
@@ -202,26 +203,67 @@ def get_tga() -> Dict:
     return {"source": "無法取得", "close_billion": None, "date": None, "trillion": None}
 
 
+def get_ccc_oas() -> Dict:
+    """ICE BofA CCC & Lower US High Yield Index OAS (BAMLH0A3HYC)"""
+    data = fetch_fred_csv("BAMLH0A3HYC")
+    if not data:
+        return {"error": "無法取得 BAMLH0A3HYC"}
+    date, value = data[0]
+    return {
+        "date": date,
+        "value": round(value, 2),
+        "threshold": 13.61,
+        "exceeded": value > 13.61,
+        "source": "FRED BAMLH0A3HYC (ICE BofA CCC & Lower OAS)"
+    }
+
+
+def get_vix() -> Dict:
+    """Cboe VIX Close (VIXCLS)"""
+    data = fetch_fred_csv("VIXCLS")
+    if not data:
+        return {"error": "無法取得 VIXCLS"}
+    date, value = data[0]
+    return {
+        "date": date,
+        "value": round(value, 2),
+        "threshold": 35.89,
+        "exceeded": value > 35.89,
+        "source": "FRED VIXCLS (Cboe VIX)"
+    }
+
+
 def generate_report() -> str:
-    """產生符合原提示詞格式的最新報告（SOFR-IORB 使用新邏輯）"""
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    """產生符合原提示詞格式的最新報告（SOFR-IORB 使用新邏輯 + 反彈三條件）"""
+    now_tw = datetime.now(TW)
+    now_str = now_tw.strftime("%Y-%m-%d %H:%M:%S (台灣時間)")
+
     s = get_sofr_iorb()
     reserves = get_reserves()
     tga = get_tga()
+    ccc = get_ccc_oas()
+    vix = get_vix()
 
     tga_t = tga.get("trillion") or 0
     approaching_1t = tga_t >= 0.85
 
+    # 反彈三條件判斷
+    spread_ok = s.get("spread_bps") is not None and s.get("spread_bps") <= 3
+    ccc_ok = not ccc.get("exceeded", True)
+    vix_ok = not vix.get("exceeded", True)
+    all_ok = spread_ok and ccc_ok and vix_ok
+
     report = f"""【官方最新數據報告】抓取時間：{now_str}
 （所有數值均為當天可取得的最新已公布數據，每一筆都標註數據日期）
 
-1. SOFR − IORB 利差
+1. SOFR − IORB 利差（隔夜融資利差）
    - SOFR 最新數值與日期：{s.get('sofr_latest_val')}% （數據日期 {s.get('sofr_latest_date')}）
    - IORB 最新數值與日期：{s.get('iorb_latest_val')}% （數據日期 {s.get('iorb_latest_date')}）
    - 基準日期（取兩者較早日期）：{s.get('base_date')}
    - 基準日 SOFR：{s.get('sofr_on_base')}% （數據日期 {s.get('base_date')}）
    - 基準日 IORB：{s.get('iorb_on_base')}% （數據日期 {s.get('base_date')}）
    - 當前利差（bps）= 基準日 SOFR − 基準日 IORB：{s.get('spread_bps')} bps
+   - 狼式參照線：不超過 3 bp → {'符合' if spread_ok else '不符合 / 觀察'}
    - 是否已連續轉正（連續多少個交易日 > 0）：{'是，連續 ' + str(s.get('consecutive_positive_days')) + ' 個交易日' if s.get('is_positive_streak') else '否（目前 ≤ 0）'}
    - 更新頻率：SOFR 每個營業日約 8:00 ET（通常落後 1 個營業日）；IORB 每日
 
@@ -237,23 +279,42 @@ def generate_report() -> str:
    - 是否正在向 1 兆美元靠攏：{'是' if approaching_1t else '否 / 觀察中'}
    - 更新頻率：日度每日更新；週度每週四
 
+4. CCC 及以下信用利差（反彈觀察條件）
+   - 最新可核讀數：{ccc.get('value')}% （數據日期 {ccc.get('date')}）
+   - 狼式參照線：不高於 13.61% → {'符合' if ccc_ok else '已突破（不符合）'}
+   - 來源：{ccc.get('source')}
+   - 說明：ICE BofA CCC & Lower US High Yield Index OAS，市值加權 Option-Adjusted Spread
+
+5. VIX 收盤（反彈觀察條件）
+   - 最新可核讀數：{vix.get('value')} （數據日期 {vix.get('date')}）
+   - 狼式參照線：不高於 35.89 → {'符合' if vix_ok else '已突破（不符合）'}
+   - 來源：{vix.get('source')}
+
+【反彈三條件總覽】
+- 隔夜融資利差 ≤ 3 bp：{'是' if spread_ok else '否'}
+- CCC 及以下 ≤ 13.61%：{'是' if ccc_ok else '否'}
+- VIX 收盤 ≤ 35.89：{'是' if vix_ok else '否'}
+- 三項全部符合：{'是（可觀察反彈）' if all_ok else '否'}
+
 注意事項：
 - 若今日有新數據尚未發布，以上為「最新已公布數據」。
 - SOFR 通常有 1 個營業日落後，IORB 幾乎即時。
 - 利差一律使用「較早日期」當天的兩項實際數據計算，確保同日可比。
-- 來源僅限官方（FRED / NY Fed / Fed H.4.1 / Treasury FiscalData）。
+- 來源僅限官方（FRED / NY Fed / Fed H.4.1 / Treasury FiscalData / ICE BofA / Cboe）。
 """
     return report
 
 
-def send_to_discord(report: str) -> None:
-    """將報告以 Embed 形式發送到所有設定的 Discord Webhook"""
+def send_to_discord(report: str) -> bool:
+    """將報告以 Embed 形式發送到所有設定的 Discord Webhook。成功至少送出一個回傳 True。"""
     webhooks = load_webhooks()
     if not webhooks:
-        print("[警告] 尚未設定有效的 Discord Webhook")
-        print("  → 本機：export DISCORD_WEBHOOKS=... 或填 DISCORD_WEBHOOKS_FALLBACK")
-        print("  → GitHub：Settings → Secrets → DISCORD_WEBHOOKS")
-        return
+        print("[錯誤] 尚未設定有效的 Discord Webhook")
+        print("  → 本機：export DISCORD_WEBHOOKS=...")
+        print("  → GitHub：Settings → Secrets and variables → Actions → New repository secret")
+        print("     Name 必須為：DISCORD_WEBHOOKS")
+        print("     Value 填完整 webhook URL（可多個，逗號分隔）")
+        return False
 
     description = report
     if len(description) > 4090:
@@ -267,28 +328,50 @@ def send_to_discord(report: str) -> None:
                 "description": f"```\n{description}\n```",
                 "color": EMBED_COLOR,
                 "footer": {
-                    "text": f"自動推送 · {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                    "text": f"自動推送 · {datetime.now(TW).strftime('%Y-%m-%d %H:%M:%S')} (台灣時間)"
                 },
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": datetime.now(timezone.utc).isoformat()
             }
         ]
     }
 
+    success_count = 0
     for i, webhook_url in enumerate(webhooks, 1):
+        masked = webhook_url[:50] + "..." if len(webhook_url) > 50 else webhook_url
+        print(f"[診斷] 正在發送 Webhook #{i}: {masked}")
         try:
             r = requests.post(webhook_url, json=payload, timeout=15)
             if r.status_code in (200, 204):
                 print(f"[成功] 已發送到 Webhook #{i}")
+                success_count += 1
             else:
-                print(f"[失敗] Webhook #{i} 回傳 {r.status_code}: {r.text[:200]}")
+                print(f"[失敗] Webhook #{i} 回傳 {r.status_code}: {r.text[:300]}")
         except Exception as e:
             print(f"[錯誤] Webhook #{i} 發送失敗: {e}")
 
+    return success_count > 0
+
 
 if __name__ == "__main__":
-    report = generate_report()
-    print(report)
-    print("\n" + "=" * 50)
-    print("開始透過 Discord Webhook 推送報告...")
-    send_to_discord(report)
-    print("推送流程結束。")
+    print("=" * 50)
+    print("紅綠燈 開始執行")
+    print(f"Python: {sys.version}")
+    print(f"工作目錄: {os.getcwd()}")
+    print(f"檔案列表: {os.listdir('.')}")
+    print("=" * 50)
+
+    try:
+        report = generate_report()
+        print(report)
+        print("\n" + "=" * 50)
+        print("開始透過 Discord Webhook 推送報告...")
+        ok = send_to_discord(report)
+        if not ok:
+            print("推送失敗，結束碼 1")
+            sys.exit(1)
+        print("推送流程結束（成功）")
+    except Exception as e:
+        print(f"[致命錯誤] {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
